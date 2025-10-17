@@ -1,0 +1,183 @@
+<!doctype html>
+<html lang="fi">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1"/>
+<title>Tulli — seuraavat lähdöt (1 & 3)</title>
+<style>
+  :root{--bg:#0b0c0d;--muted:#9aa0a6;--accent:#00bfb3}
+  html,body{height:100%;margin:0;background:var(--bg);color:#fff;font-family:Inter,Segoe UI,Arial,sans-serif}
+  .wrap{display:grid;grid-template-columns:1fr 1fr;gap:18px;padding:28px;box-sizing:border-box;height:100%}
+  header{grid-column:1/-1;display:flex;align-items:center;justify-content:space-between}
+  h1{margin:0;font-size:28px;letter-spacing:0.4px}
+  .clock{font-size:20px;color:var(--muted)}
+  .card{background:rgba(255,255,255,0.03);border-radius:12px;padding:18px;display:flex;flex-direction:column;min-height:220px}
+  .station-title{font-size:18px;color:var(--muted);margin-bottom:8px}
+  .line-block{margin-bottom:12px}
+  .line-title{font-weight:700;font-size:20px;margin-bottom:6px}
+  .direction{font-size:16px;color:var(--muted);margin-bottom:6px}
+  .departures{display:flex;flex-direction:column;gap:6px}
+  .dep{display:flex;justify-content:space-between;align-items:center;padding:8px 10px;border-radius:8px;background:rgba(255,255,255,0.02)}
+  .dep .route{font-weight:700}
+  .dep .time{font-size:18px}
+  footer{grid-column:1/-1;color:var(--muted);font-size:13px;margin-top:6px}
+  .now{color:#00bfb3;font-weight:700;}
+  @media(max-width:900px){.wrap{grid-template-columns:1fr;}}
+</style>
+</head>
+<body>
+  <div class="wrap">
+    <header>
+      <h1>Tulli — ratikat (linjat 1 &amp; 3)</h1>
+      <div class="clock" id="clock">--:--</div>
+    </header>
+
+    <div class="card" id="card-A">
+      <div class="station-title">Tulli A (stopPointId: 0811)</div>
+      <div id="content-A">Ladataan...</div>
+    </div>
+
+    <div class="card" id="card-B">
+      <div class="station-title">Tulli B (stopPointId: 0812)</div>
+      <div id="content-B">Ladataan...</div>
+    </div>
+
+    <footer>Data: Nysse / ITS Factory Journeys API • Päivittyy 10 s välein</footer>
+  </div>
+
+<script>
+const API_BASE = 'https://data.itsfactory.fi/journeys/api/1';
+const STOP_A = '0811';
+const STOP_B = '0812';
+const LINES_WANTED = ['1','3'];
+
+function updateClock(){
+  const el = document.getElementById('clock');
+  const now = new Date();
+  const hh = String(now.getHours()).padStart(2,'0');
+  const mm = String(now.getMinutes()).padStart(2,'0');
+  const ss = String(now.getSeconds()).padStart(2,'0');
+  el.textContent = `${hh}:${mm}:${ss}`;
+}
+setInterval(updateClock,1000);
+updateClock();
+
+async function fetchJourneysFor(stopId){
+  const url = `${API_BASE}/journeys?stopPointId=${encodeURIComponent(stopId)}&pageSize=200`;
+  const res = await fetch(url);
+  if(!res.ok) throw new Error('HTTP ' + res.status);
+  const obj = await res.json();
+  return obj.journeys || obj.body || obj;
+}
+
+function normalizeJourneys(rawList){
+  const out = [];
+  const seen = new Set();
+  (rawList || []).forEach(j => {
+    const line = (j.line && (j.line.name || j.line.shortName)) || j.lineName || j.lineId || j.routeName || (j.lineUrl && j.lineUrl.split('/').pop()) || '';
+    const headsign = j.headSign || j.headsign || j.destination || '';
+    let departureISO = j.onwardCalls && j.onwardCalls[0] && (j.onwardCalls[0].expectedDepartureTime || j.onwardCalls[0].expectedArrivalTime) || j.expectedDepartureTime || j.departureTimeIso || null;
+    if(!departureISO && j.departureTime){
+      const today = new Date();
+      const d = today.toISOString().slice(0,10);
+      departureISO = d + 'T' + j.departureTime;
+    }
+    const key = `${line}|${headsign}|${departureISO}`;
+    if(!seen.has(key)){
+      out.push({line: String(line).trim(), headsign: headsign || '', departureISO});
+      seen.add(key);
+    }
+  });
+  return out;
+}
+
+function minutesUntil(iso){
+  if(!iso) return null;
+  const t = Date.parse(iso);
+  if(isNaN(t)) return null;
+  return Math.round((t - Date.now()) / 60000);
+}
+
+function renderFor(containerId, stopId, journeys){
+  const el = document.getElementById(containerId);
+  if(!journeys || journeys.length === 0){
+    el.innerHTML = '<div class="direction">Ei lähteviä vuoroja tiedossa.</div>';
+    return;
+  }
+
+  const filtered = journeys
+    .filter(j => LINES_WANTED.includes(String(j.line).replace(/\s/g,'')))
+    .filter(j => {
+      const mins = minutesUntil(j.departureISO);
+      return mins !== null && mins >= 0;
+    });
+
+  if(filtered.length === 0){
+    el.innerHTML = '<div class="direction">Ei linjoja 1 tai 3 juuri nyt.</div>';
+    return;
+  }
+
+  const groups = {};
+  filtered.forEach(j => {
+    const key = `${j.line} — ${j.headsign || '—'}`;
+    groups[key] = groups[key] || [];
+    groups[key].push(j);
+  });
+
+  let html = '';
+  Object.keys(groups).sort().forEach(k => {
+    const arr = groups[k].sort((a,b) => {
+      const ma = minutesUntil(a.departureISO) ?? 9999;
+      const mb = minutesUntil(b.departureISO) ?? 9999;
+      return ma - mb;
+    }).slice(0,5);
+
+    const [line, headsign] = k.split(' — ');
+    html += `<div class="line-block"><div class="line-title">Linja ${line}</div><div class="direction">${headsign}</div><div class="departures">`;
+
+    let nowShown = false;
+    arr.forEach(item => {
+      const mins = minutesUntil(item.departureISO);
+      const arrivalTime = item.departureISO ? new Date(item.departureISO) : null;
+      const arrivalStr = arrivalTime ? arrivalTime.getHours().toString().padStart(2,'0') + ':' + arrivalTime.getMinutes().toString().padStart(2,'0') : '—';
+
+      let timeLabel;
+      if(mins === null){
+        timeLabel = arrivalStr;
+      } else if(mins <= 0 && !nowShown){
+        timeLabel = `<span class="now">nyt</span> (${arrivalStr})`;
+        nowShown = true;
+      } else {
+        timeLabel = mins + ' min' + ` (${arrivalStr})`;
+      }
+
+      html += `<div class="dep"><div class="route">${line} → ${item.headsign || '—'}</div><div class="time">${timeLabel}</div></div>`;
+    });
+
+    html += `</div></div>`;
+  });
+
+  el.innerHTML = html;
+}
+
+async function updateAll(){
+  try{
+    const rawA = await fetchJourneysFor(STOP_A);
+    const normA = normalizeJourneys(rawA);
+    renderFor('content-A', STOP_A, normA);
+
+    const rawB = await fetchJourneysFor(STOP_B);
+    const normB = normalizeJourneys(rawB);
+    renderFor('content-B', STOP_B, normB);
+  }catch(err){
+    console.error(err);
+    document.getElementById('content-A').innerHTML = '<div class="direction">Virhe ladattaessa.</div>';
+    document.getElementById('content-B').innerHTML = '<div class="direction">Virhe ladattaessa.</div>';
+  }
+}
+
+updateAll();
+setInterval(updateAll, 10000); // Päivitetään 10 sekunnin välein
+</script>
+</body>
+</html>
